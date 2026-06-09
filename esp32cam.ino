@@ -8,6 +8,8 @@ const char* WIFI_PASSWORD = "B320-323";
 const char* SERVER_URL    = "http://192.168.1.104:5000/upload";
 
 #define FLASH_LED_PIN   4
+#define FLASH_INTENSITE 90   // 0-255 : intensite du flash (PWM) pour ne pas cramer l'image
+
 #define PWDN_GPIO_NUM  32
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM   0
@@ -26,12 +28,13 @@ const char* SERVER_URL    = "http://192.168.1.104:5000/upload";
 #define PCLK_GPIO_NUM  22
 
 #define UART_BAUD    115200
-#define HTTP_TIMEOUT 60000  // CORRECTION : 60 secondes au lieu de 30
+#define HTTP_TIMEOUT 60000
 
 String uartBuf = "";
 
-void flashOn()  { digitalWrite(FLASH_LED_PIN, HIGH); }
-void flashOff() { digitalWrite(FLASH_LED_PIN, LOW);  }
+// Flash adouci en PWM (evite la surexposition du visage)
+void flashOn()  { analogWrite(FLASH_LED_PIN, FLASH_INTENSITE); }
+void flashOff() { analogWrite(FLASH_LED_PIN, 0); }
 
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
@@ -78,8 +81,8 @@ bool startCamera() {
 
   if (psramFound()) {
     Serial.println("PSRAM DETECTEE");
-    config.frame_size   = FRAMESIZE_SVGA;
-    config.jpeg_quality = 10;
+    config.frame_size   = FRAMESIZE_SVGA;   // 800x600
+    config.jpeg_quality = 10;               // 0-63 : plus bas = meilleure qualite
     config.fb_count     = 2;
     config.fb_location  = CAMERA_FB_IN_PSRAM;
   } else {
@@ -95,19 +98,31 @@ bool startCamera() {
     return false;
   }
 
+  // ── Reglages capteur optimises pour la reconnaissance faciale ──
   sensor_t* s = esp_camera_sensor_get();
   if (s != NULL) {
     s->set_vflip(s, 1);
     s->set_hmirror(s, 1);
-    s->set_brightness(s, 2);
-    s->set_contrast(s, 1);
-    s->set_saturation(s, 1);
+
+    s->set_brightness(s, 0);    // 0 au lieu de 2 : le flash eclaire deja
+    s->set_contrast(s, 2);      // +contraste : combat l'aspect terne/voile
+    s->set_saturation(s, 0);
+
     s->set_whitebal(s, 1);
     s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);       // balance des blancs auto
+
     s->set_exposure_ctrl(s, 1);
     s->set_aec2(s, 1);
+    s->set_ae_level(s, 1);      // remonte legerement l'expo sur le sujet
+
     s->set_gain_ctrl(s, 1);
-    s->set_gainceiling(s, (gainceiling_t)4);
+    s->set_gainceiling(s, (gainceiling_t)2);  // GAINCEILING_4X : moins de bruit
+
+    s->set_lenc(s, 1);          // correction de l'objectif
+    s->set_dcw(s, 1);
+    s->set_bpc(s, 1);           // correction pixels defectueux
+    s->set_wpc(s, 1);
   }
 
   Serial.println("CAMERA OK");
@@ -154,8 +169,6 @@ void captureAndSend() {
 
   HTTPClient http;
   WiFiClient client;
-
-  // CORRECTION : augmenter buffer TCP
   client.setNoDelay(true);
 
   http.begin(client, SERVER_URL);
@@ -191,17 +204,13 @@ void captureAndSend() {
       const char* name    = doc["name"]    | "";
       float distance      = doc["distance"] | -1.0f;
 
-      // ============================================
       // CAS 1 : AUCUN VISAGE DETECTE
-      // ============================================
       if (strcmp(message, "No face detected") == 0) {
         Serial.println(">>> CAS : AUCUN VISAGE DETECTE <<<");
         Serial.println("DISTRIBUTION MEDICAMENT : NON");
         Serial.println("RESULTAT : AUCUN VISAGE");
 
-      // ============================================
       // CAS 2 : VISAGE RECONNU (bonne personne)
-      // ============================================
       } else if (success && match) {
         Serial.println(">>> CAS : VISAGE CORRECT <<<");
         Serial.print("PATIENT RECONNU : ");
@@ -213,9 +222,7 @@ void captureAndSend() {
         Serial.println("DISTRIBUTION MEDICAMENT : OUI");
         Serial.println("RESULTAT : OK");
 
-      // ============================================
       // CAS 3 : VISAGE DETECTE MAIS MAUVAISE PERSONNE
-      // ============================================
       } else {
         Serial.println(">>> CAS : VISAGE INCORRECT <<<");
         if (strlen(name) > 0) {
@@ -232,7 +239,6 @@ void captureAndSend() {
     }
 
   } else {
-    // ERREUR HTTP (timeout, connexion refusee, etc.)
     Serial.print("ERREUR HTTP CODE : ");
     Serial.println(code);
     if (code == -1)  Serial.println("DETAIL : CONNEXION REFUSEE");
